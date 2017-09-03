@@ -2,83 +2,44 @@ package main
 
 import (
 	"archive/zip"
-	"bytes"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/cj123/ranger"
-	"github.com/dhowett/go-plist"
+	"github.com/cj123/go-ipsw"
+	"github.com/cj123/go-ipsw/api"
 )
-
-const defaultBufferSize = 128 * 1024
 
 var (
-	identifier, downloadURL string
+	identifier, buildid string
+	client              = api.NewIPSWClient("https://api.ipsw.me/v3")
 )
-
-type BuildManifest struct {
-	BuildIdentities       []BuildIdentity
-	SupportedProductTypes []string
-	ProductVersion        string
-	ProductBuildVersion   string
-}
-
-type BuildIdentity struct {
-	Info     BuildIdentityInfo
-	Manifest BuildIdentityManifest
-}
-
-type BuildIdentityInfo struct {
-	BuildNumber string
-	BuildTrain  string
-	DeviceClass string
-}
-
-type BuildIdentityManifest map[string]Manifest
-
-type Manifest struct {
-	Info ManifestInfo
-}
-
-type ManifestInfo struct {
-	Path string
-}
 
 func init() {
 	flag.StringVar(&identifier, "i", "", "the identifier (e.g. iPhone4,1) you want to download")
-	flag.StringVar(&downloadURL, "u", "", "the URL of the IPSW")
+	flag.StringVar(&buildid, "b", "", "the buildid (e.g. 8C148) you want to download")
 	flag.Parse()
 }
 
 func main() {
-	if identifier == "" || downloadURL == "" {
-		log.Fatal("Invalid identifier/url specified.")
+	if identifier == "" || buildid == "" {
+		log.Fatal("Invalid identifier/buildid specified.")
 	}
 
-	buildManifestData := new(bytes.Buffer)
-
-	// first off, grab the build manifest
-	err := downloadFile(downloadURL, "BuildManifest.plist", buildManifestData)
+	ipswFile, err := ipsw.NewIPSWWithIdentifierBuild(client, identifier, buildid)
 
 	if err != nil {
-		log.Fatalf("Unable to fetch BuildManifest, err: %s", err)
+		log.Fatalf("Could not initialise IPSW, err: %s", err)
 	}
 
-	var buildManifest BuildManifest
-
-	_, err = plist.Unmarshal(buildManifestData.Bytes(), &buildManifest)
+	buildManifest, err := ipswFile.BuildManifest()
 
 	if err != nil {
-		log.Fatalf("Unable to read BuildManifest, err: %s", err)
+		log.Fatalf("Unable to get BuildManifest, err: %s", err)
 	}
 
 	productIndex := -1
@@ -102,8 +63,8 @@ func main() {
 	}
 
 	requiredFiles := buildManifest.BuildIdentities[productIndex].Manifest
-	requiredFiles["BuildManifest"] = Manifest{ManifestInfo{Path: "BuildManifest.plist"}}
-	requiredFiles["Restore"] = Manifest{ManifestInfo{Path: "Restore.plist"}}
+	requiredFiles["BuildManifest"] = ipsw.Manifest{Info: ipsw.ManifestInfo{Path: ipsw.BuildManifestFilename}}
+	requiredFiles["Restore"] = ipsw.Manifest{Info: ipsw.ManifestInfo{Path: ipsw.RestoreFilename}}
 
 	for name, file := range requiredFiles {
 		if file.Info.Path == "" {
@@ -126,7 +87,7 @@ func main() {
 			log.Fatalf("Unable to create file: %s, err: %s", downloadPath, err)
 		}
 
-		err = downloadFile(downloadURL, file.Info.Path, f)
+		err = ipsw.DownloadFile(ipswFile.Resource, file.Info.Path, f)
 
 		if err != nil {
 			log.Fatalf("Unable to download file %s, err: %s", file.Info.Path, err)
@@ -154,75 +115,6 @@ func main() {
 	}
 
 	log.Println("Done! Happy restoring :-)")
-}
-
-func downloadFile(resource, file string, w io.Writer) error {
-	u, err := url.Parse(resource)
-
-	if err != nil {
-		return err
-	}
-
-	// retrieve the Restore.plist from the IPSW, possibly need the BuildManifest too?
-	reader, err := ranger.NewReader(
-		&ranger.HTTPRanger{
-			URL: u,
-			Client: &http.Client{
-				Timeout: 30 * time.Second,
-			},
-		},
-	)
-
-	if err != nil {
-		return err
-	}
-
-	zipReader, err := zip.NewReader(reader, reader.Length())
-
-	if err != nil {
-		return err
-	}
-
-	for _, f := range zipReader.File {
-		if f.Name == file {
-			return bufferedDownload(f, w)
-		}
-	}
-
-	return errors.New("file not found")
-}
-
-func bufferedDownload(file *zip.File, writer io.Writer) error {
-	rc, err := file.Open()
-
-	if err != nil {
-		return err
-	}
-
-	defer rc.Close()
-
-	downloaded := uint64(0)
-	filesize := file.UncompressedSize64
-	buf := make([]byte, defaultBufferSize)
-
-	for {
-		// adjust the size of the buffer to get the exact
-		// number of bytes we want to download
-		if downloaded+defaultBufferSize > filesize {
-			buf = make([]byte, filesize-downloaded)
-		}
-
-		if n, err := io.ReadFull(rc, buf); n > 0 {
-			writer.Write(buf[:n])
-			downloaded += uint64(n)
-		} else if err != nil && err != io.EOF {
-			return err
-		} else {
-			break
-		}
-	}
-
-	return nil
 }
 
 func archive(source, target string) error {
