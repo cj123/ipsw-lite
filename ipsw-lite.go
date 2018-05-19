@@ -16,7 +16,7 @@ import (
 
 var (
 	identifier, buildid string
-	client              = api.NewIPSWClient("https://api.ipsw.me/v3")
+	client              = api.NewIPSWClient("https://api.ipsw.me/v4", nil)
 )
 
 func init() {
